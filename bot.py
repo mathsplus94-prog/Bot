@@ -1,22 +1,29 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# ==============================================================================
-#  🚕 BHARAT TAXI BULK BOT (AMUL) - PUBLIC VERSION
-#  Powered by python-telegram-bot (Python 3.14 Compatible)
-# ==============================================================================
-
-import os, sys, re, json, time, uuid, random
+import os, sys, re, json, time, uuid, random, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # ─── TELEGRAM BOT CONFIG ──────────────────────────────────────────────────────
-BOT_TOKEN = "9265161951:AAEqQv7-1uTs8K67ReDYUGj9dZ3qADE2bZU" # Tera Naya Token
+BOT_TOKEN = "9265161951:AAEqQv7-1uTs8K67ReDYUGj9dZ3qADE2bZU" # Tera Token
 
-# Session storage (Har user ka data alag rahega)
+# ─── DUMMY WEB SERVER (Render Free Tier ke liye) ──────────────────────────────
+class WebServerHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), WebServerHandler)
+    print(f"🌐 Web server running on port {port}")
+    server.serve_forever()
+
 user_sessions = {}
 
 # ─── API CLIENT ───────────────────────────────────────────────────────────────
@@ -65,7 +72,6 @@ class Taxi:
         except: pass
         return []
 
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
 def _clean_num(raw):
     if not raw: return ""
     x = re.sub(r"[^0-9]", "", str(raw))
@@ -78,74 +84,59 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🚕 <b>BHARAT TAXI BULK BOT</b> 🚕\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 <b>Command List:</b>\n"
         "👉 <code>/send 9999999999 9876543210</code>\n"
-        "   <i>(Ek saath multiple numbers bhejne ke liye space ka use karein)</i>\n\n"
         "👉 <code>/verify 1234 5678 9012</code>\n"
-        "   <i>(OTP bhejne ke liye, numbers ke order mein)</i>\n\n"
-        "⚠️ <b>Note:</b> Number aur OTP ka order same hona chahiye.\n"
-        "━━━━━━━━━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def send_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     args = context.args
-    
     if not args:
-        return await update.message.reply_text("❌ Format: <code>/send 9999999999 8888888888</code>", parse_mode="HTML")
+        return await update.message.reply_text("❌ Format: <code>/send 9999999999</code>", parse_mode="HTML")
     
     valid_nums = [_clean_num(x) for x in args]
     valid_nums = [n for n in valid_nums if n]
-    
     if not valid_nums:
-        return await update.message.reply_text("❌ Koi valid 10-digit number nahi mila.", parse_mode="HTML")
+        return await update.message.reply_text("❌ No valid numbers.")
 
-    wait_msg = await update.message.reply_text(f"⏳ <b>{len(valid_nums)} numbers par OTP bhej raha hoon...</b>", parse_mode="HTML")
-    
+    wait_msg = await update.message.reply_text(f"⏳ Sending OTPs...", parse_mode="HTML")
     session_nums = {}
     success_count = 0
     
     for phone in valid_nums:
         taxi = Taxi()
-        ok, aid = await __import__('asyncio').to_thread(taxi.send_otp, phone)
+        ok, aid = await asyncio.to_thread(taxi.send_otp, phone)
         if ok:
             session_nums[phone] = {"client": taxi, "aid": aid}
             success_count += 1
-        await __import__('asyncio').sleep(2) # Anti-ban delay
+        await asyncio.sleep(2)
 
     if success_count == 0:
-        return await wait_msg.edit_text("❌ Sabhi numbers par OTP fail ho gaya (IP Block ya Server Error).")
+        return await wait_msg.edit_text("❌ All failed (IP Block).")
 
     user_sessions[uid] = {"numbers": session_nums, "order": [n for n in valid_nums if n in session_nums]}
-    
     txt = f"✅ <b>OTP Sent to {success_count} numbers!</b>\n\n"
-    txt += "📝 <b>Ab OTP isi order mein bhejein:</b>\n"
     for i, n in enumerate(user_sessions[uid]["order"], 1):
         txt += f"{i}. <code>{n}</code>\n"
-    txt += f"\n👇 OTP type karein (e.g. <code>/verify 1234 5678</code>)"
-    
+    txt += f"\n👇 <code>/verify 1234 5678</code>"
     await wait_msg.edit_text(txt, parse_mode="HTML")
 
 async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.from_user.id
     args = context.args
-    
     if uid not in user_sessions:
-        return await update.message.reply_text("⚠️ Pehle /send command se numbers bhejein.", parse_mode="HTML")
+        return await update.message.reply_text("⚠️ Send numbers first via /send", parse_mode="HTML")
 
     otps = [p.strip() for p in args if p.isdigit() and len(p)==4]
-    if not otps:
-        return await update.message.reply_text("❌ Format: <code>/verify 1234 5678</code> (Sirf 4-digit OTP)", parse_mode="HTML")
-
     session_data = user_sessions[uid]
     numbers_order = session_data["order"]
     
     if len(otps) != len(numbers_order):
-        return await update.message.reply_text(f"⚠️ OTP count match nahi kar raha!\nTune {len(numbers_order)} numbers bheje the, par {len(otps)} OTP daale.", parse_mode="HTML")
+        return await update.message.reply_text(f"⚠️ Count mismatch!", parse_mode="HTML")
 
-    wait_msg = await update.message.reply_text("⏳ <b>Verify kar raha hoon...</b>", parse_mode="HTML")
-    await __import__('asyncio').sleep(1)
+    wait_msg = await update.message.reply_text("⏳ Verifying...", parse_mode="HTML")
+    await asyncio.sleep(1)
     await wait_msg.delete()
 
     for i, phone in enumerate(numbers_order):
@@ -153,44 +144,31 @@ async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = session_data["numbers"][phone]
         taxi = data["client"]
         aid = data["aid"]
-
-        status_msg = await update.message.reply_text(f"🔄 <code>{phone}</code> ko verify kar raha hoon...", parse_mode="HTML")
+        status_msg = await update.message.reply_text(f"🔄 <code>{phone}</code> verifying...", parse_mode="HTML")
         
-        ok_verify = await __import__('asyncio').to_thread(taxi.verify, aid, otp)
-        
+        ok_verify = await asyncio.to_thread(taxi.verify, aid, otp)
         if ok_verify:
-            rewards = await __import__('asyncio').to_thread(taxi.get_rewards)
+            rewards = await asyncio.to_thread(taxi.get_rewards)
             coupons = [r for r in rewards if isinstance(r, dict) and r.get("couponCode")] if isinstance(rewards, list) else []
-            
             if coupons:
-                txt = f"🎉 <b>JACKPOT!</b> 🎉\n\n"
-                txt += f"📱 Number: <code>{phone}</code>\n"
+                txt = f"🎉 <b>JACKPOT!</b>\n📱 {phone}\n"
                 for c in coupons:
-                    txt += f"🍦 {c.get('campaignName')}: <code>{c.get('couponCode')}</code>\n"
-                    # Save to file
-                    with open("amul_codes_looted.txt", "a") as f:
-                        f.write(f"Phone: {phone} | Code: {c.get('couponCode')}\n")
+                    txt += f"🍦 {c.get('couponCode')}\n"
             else:
-                txt = f"✅ <b>Login Successful</b>\n\n"
-                txt += f"📱 Number: <code>{phone}</code>\n"
-                txt += "⚠️ <i>No Coupons (0 rides)</i>"
-            
+                txt = f"✅ <b>Login OK</b>\n📱 {phone}\n⚠️ No Coupons"
             await status_msg.edit_text(txt, parse_mode="HTML")
         else:
-            await status_msg.edit_text(f"❌ <b>Wrong OTP / Timeout</b>\n\n📱 Number: <code>{phone}</code>", parse_mode="HTML")
-        
-        await __import__('asyncio').sleep(1.5)
+            await status_msg.edit_text(f"❌ <b>Wrong OTP</b>\n📱 {phone}", parse_mode="HTML")
+        await asyncio.sleep(1.5)
         
     del user_sessions[uid]
     await update.message.reply_text("✅ <b>Process Complete!</b>", parse_mode="HTML")
 
-# ─── MAIN RUNNER ──────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    print("🚀 Public Bot Started! Anyone can use it now.")
+    threading.Thread(target=run_web_server, daemon=True).start()
+    print("🚀 Bot Started!")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("send", send_cmd))
     app.add_handler(CommandHandler("verify", verify_cmd))
-    
     app.run_polling()
